@@ -1,0 +1,83 @@
+#!/bin/sh
+
+while [ -n "$1" ]
+do
+	FILE=$1
+	shift
+
+	printf >&2 "Compiling image manifests from %s\n" "$FILE"
+
+	if [ ! -f "$FILE" ]
+	then
+		printf >&2 "Unable to locate %s\n" "$FILE"
+		continue
+	fi
+
+	exec 3<$FILE
+
+	while read -r LINE <&3
+	do
+		test -n "$LINE" || continue
+
+		if [ "${LINE#- }" = "${LINE}" ]
+		then
+			SOURCE=$LINE
+			continue
+		fi
+
+		LINE=${LINE#- }
+		LINE=${LINE#file://}
+
+		if [ "${LINE#data/}" = "$LINE" ]
+		then
+			HASH=$(printf "%s" "$LINE" | md5sum)
+			HASH=${HASH%% *}
+		else
+			HASH=${LINE#data/}
+			HASH=${HASH%.*}
+		fi
+
+		IMAGE=$(find "$DATA" -maxdepth 1 -type f -name "${HASH}.*")
+
+		if [ -z "$IMAGE" ]
+		then
+			OLDHASH=$(printf "%s\n" "$LINE" | md5sum)
+			OLDHASH=${OLDHASH%% *}
+
+			OLDIMAGE=$(find "$DATA" -maxdepth 1 -type f -name "${OLDHASH}.*")
+
+			if [ -n "$OLDIMAGE" ]
+			then
+				printf >&2 "Updating image hash: %s -> %s\n" "$OLDHASH" "$HASH"
+				EXT="${OLDIMAGE##*.}"
+				mv -v "$OLDIMAGE" "$DATA/${HASH}.$EXT" >&2
+
+				if [ -f "${THUMBS}/thumb_${OLDHASH}.jpg" ]
+				then
+					mv -v "${THUMBS}/thumb_${OLDHASH}.jpg" "${THUMBS}/thumb_${HASH}.jpg" >&2
+				fi
+
+				IMAGE="$HASH.$EXT"
+			else
+				printf >&2 "New Image: %s %s from %s\n" "$HASH" "$LINE" "$FILE"
+
+				DOWNLOADED=$(gallery-dl -d tmp "$LINE")
+				DOWNLOADED=${DOWNLOADED#\# }
+
+				printf >&2 "%s\n" "${DOWNLOADED}"
+
+				IMAGE="$HASH.${DOWNLOADED##*.}"
+				mv -v "$DOWNLOADED" "$DATA/$IMAGE" >&2
+			fi
+		else
+			IMAGE=${IMAGE#${DATA}/}
+		fi
+
+		if [ ! -f "${THUMBS}/thumb_${HASH}.jpg" ]
+		then
+			convert "${DATA}/${IMAGE}[0]" -resize 600x200 -background white -flatten "jpg:${THUMBS}/thumb_${HASH}.jpg"
+		fi
+
+		printf "%s\t%s\t%s\n" "$IMAGE" "$LINE" "${SOURCE:-#}"
+	done
+done

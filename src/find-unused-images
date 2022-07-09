@@ -1,0 +1,42 @@
+#!/bin/sh
+
+DATA=${DATA:-data}
+
+TMPDIR=$(mktemp -d)
+
+find "${DATA}" -type f | while read -r FILE
+do
+	touch "$TMPDIR/${FILE#${DATA}/}"
+done
+
+while [ -n "$1" ]
+do
+	SOURCE=$1
+	shift
+
+	if [ "${SOURCE%/_all.txt}" != "$SOURCE" ]
+	then
+		printf >&2 "Skipping _all\n"
+		continue
+	fi
+
+	if [ "${SOURCE%/_unused.txt}" != "$SOURCE" ]
+	then
+		printf >&2 "Skipping _unused\n"
+		continue
+	fi
+
+	exec 3<$SOURCE
+
+	while read -r IMAGE _ _ <&3
+	do
+		rm -f "$TMPDIR/${IMAGE#${DATA}/}"
+	done
+done
+
+find "${TMPDIR}" -type f | while read -r FILE
+do
+	printf "%s\t???\t???\n" "${FILE#$TMPDIR/}"
+done
+
+rm -Rf "$TMPDIR"

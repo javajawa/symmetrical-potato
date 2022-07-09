@@ -1,0 +1,80 @@
+#!/bin/sh
+
+while [ -n "$1" ]
+do
+	SOURCE=$1
+	shift
+
+	NAME=$SOURCE
+	NAME=${NAME%.txt}
+	NAME=${NAME##*/}
+
+	printf >&2 "Compiling %s from %s\n" "$NAME" "$SOURCE"
+
+	if [ ! -f "$SOURCE" ]
+	then
+		printf >&2 "Unable to locate %s\n" "$SOURCE"
+		continue
+	fi
+
+	COUNT=$(wc -l "$SOURCE")
+	COUNT=${COUNT%% *}
+	PRETTY_NAME=$(printf "%s" "$NAME" | sed -e 's/[_\-]/ /g' -e 's/.*/\L&/; s/[a-z]*/\u&/g')
+
+	printf "<!DOCTYPE html>\n"
+	printf "\t<html>\n"
+	printf "\t\t<head>\n"
+	printf "\t\t\t<meta charset=\"utf-8\">\n"
+	printf "\t\t\t<title>%s</title>\n" "$PRETTY_NAME"
+	printf "\t\t\t<meta property=\"og:title\" content=\"%s\">\n" "$PRETTY_NAME"
+	printf "\t\t\t<meta property=\"og:type\" content=\"website\">\n"
+	printf "\t\t\t<meta property=\"og:description\" content=\"%d lewds in %s, updated %s\">" "$COUNT" "$PRETTY_NAME" "$(date -I -r "$SOURCE")"
+	printf "\t\t\t<meta property=\"og:url\" content=\"https://tea-cats.co.uk/smut/%s/\"\n>" "$NAME"
+	printf "\t\t\t<meta property=\"og:image\" content=\"https://tea-cats.co.uk/smut/%s/thumb.webp\">\n" "$NAME"
+	printf "\t\t\t<meta name=\"twitter:card\" content=\"summary_large_image\">\n"
+	printf "\t\t\t<meta name=\"twitter:image\" content=\"https://tea-cats.co.uk/smut/%s/thumb.webp\">\n" "$NAME"
+	printf "\t\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+	printf "\t\t\t<link rel=\"stylesheet\" href=\"/%s/style.css\">\n" "$SMUT"
+	printf "\t\t\t<script src=\"/%s/images.js\"></script>\n" "$SMUT"
+	printf "\t\t</head>\n"
+	printf "\t\t<body>\n"
+
+	exec 3<"${SOURCE}"
+
+	while read -r IMAGE _ SOURCE <&3
+	do
+		HASH=${IMAGE%.*}
+		EXT=${IMAGE##*.}
+
+		DIMENSIONS=$(identify -format '%[fx:w]:%[fx:h]' "${THUMBS}/thumb_${HASH}.jpg")
+		WIDTH=${DIMENSIONS%:*}
+		HEIGHT=${DIMENSIONS#*:}
+
+		DIMENSIONS=$(identify -format '%[fx:w]:%[fx:h]' "${DATA}/${IMAGE}[0]")
+		NAT_WIDTH=${DIMENSIONS%:*}
+		NAT_HEIGHT=${DIMENSIONS#*:}
+
+		EXTRA_CLASS=""
+		if [ "$EXT" = "mp4" -o "$EXT" = "gif" -o "$EXT" = "gifv" ]
+		then
+			EXTRA_CLASS=" video"
+		fi
+
+		IPATH="/${SMUT}/${DATA}/${IMAGE}"
+		TPATH="/${SMUT}/${THUMBS}/thumb_${HASH}.jpg"
+
+		printf "
+			<div class=\"img%s\" data-href=\"%s\" data-width=\"%d\" data-height=\"%d\">
+				<a href=\"%s\" target=\"_blank\" title=\"%s\">
+					<img src=\"%s\" width=\"%d\" height=\"%d\" />
+				</a>
+				<a href=\"%s\" target=\"_blank\" class=\"source\" title=\"Go to Source\">↗</a>
+				<a href=\"%s\" download class=\"download\" title=\"Download Full Size\">⇩</a>
+			</div>
+	" "$EXTRA_CLASS" "$IPATH" "$NAT_WIDTH" "$NAT_HEIGHT" "$IPATH" "$SOURCE" "$TPATH" "$WIDTH" "$HEIGHT" "$SOURCE" "$IPATH"
+	done
+
+	exec 3<&-
+
+	printf "\t</body>\n</html>\n"
+done

@@ -1,0 +1,10 @@
+#!/bin/sh
+
+while [ -n "$1" ]
+do
+	FILE=${1%.*}
+	shift
+
+	find data -name "${FILE}*" -print -delete
+	find thumbs -name "thumb_${FILE}.jpg" -print -delete
+done

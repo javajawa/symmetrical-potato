@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
+
+import abc
+import dataclasses
+import glob
+import hashlib
+import json
+import logging
+import os
+import subprocess
+import random
+import itertools
+import sys
+
+from wsgiref.handlers import format_date_time
+import gunicorn.app.base  # type: ignore
+
+
+WSGIEnv = Dict[str, str]
+WSGICallback = Callable[[str, Sequence[Tuple[str, str]]], None]
+
+
+@dataclasses.dataclass
+class Response:
+    status: int
+    mime_type: str
+    contents: Union[bytes, Iterable[bytes]]
+    modified: Optional[float] = None
+    tag: Optional[str] = None
+    headers: List[Tuple[str, str]] = dataclasses.field(default_factory=list)
+
+    def get_status(self) -> str:
+        return str(self.status)
+
+    def get_headers(self) -> List[Tuple[str, str]]:
+        headers: Dict[str, str] = {
+            "Content-Type": self.mime_type,
+            "Cache-Control": "private, max-age=0",
+        }
+
+        if self.modified:
+            headers["Last-Modified"] = format_date_time(self.modified)
+
+        ret = list(headers.items())
+        ret.extend(self.headers)
+
+        return ret
+
+    def get_contents(self) -> Iterable[bytes]:
+        if isinstance(self.contents, bytes):
+            return [self.contents]
+
+        return self.contents
+
+
+class Image:
+    iid: str
+    url: str
+    source: str
+
+    def __init__(self, iid: str, url: str, source: str) -> None:
+        self.iid = iid[0:32]
+        self.url = url
+
+        self.source = source
+
+        files = glob.glob(f"data/{self.iid}.*")
+
+        if not files:
+            raise Exception(f"Missing image: {self.iid} ({url} from {source})")
+
+        if self.url == "???":
+            self.url = "file://" + files[0]
+            self.source = "[dangling image]"
+
+    def __str__(self) -> str:
+        return f"{self.iid} ({self.source})"
+
+
+class Handler(abc.ABC):
+    queue: str
+    qfile: str
+    images: List[Image]
+    unused: List[Image]
+
+    def __init__(self, queue: str) -> None:
+        self.reload(queue)
+
+    def reload(self, qfile: str) -> None:
+        self.qfile = qfile
+        self.queue = os.path.basename(qfile)
+
+        self.images = []
+        self.unused = []
+
+        seen: Set[str] = set()
+
+        if os.path.exists(f"ordered/ordering-{self.queue}"):
+            fil = f"boards/ordering-{self.queue}"
+        else:
+            fil = f"boards/{self.queue}"
+
+        subprocess.run(["make", fil], check=True)
+        subprocess.run(["make", "boards/reserve.txt"], check=True)
+
+        self.load_file(fil, self.images, seen, False)
+        self.load_file("boards/_unused.txt", self.unused, seen)
+        self.load_file("boards/reserve.txt", self.unused, seen)
+
+        self.write_out()
+
+    def load_file(self, fil: str, sink: List[Image], seen: Set[str], throw: bool = False) -> None:
+        logging.warning("Loading file %s", fil)
+        with open(fil, "rt", encoding="utf-8") as infile:
+            for line in infile:
+                iid, image, source = line.strip().split("\t")
+
+                if iid in seen:
+                    continue
+
+                seen.add(iid)
+                try:
+                    sink.append(Image(iid, image, source))
+                except Exception as e:
+                    if throw:
+                        raise e
+
+    def __call__(self, environ: WSGIEnv, start: WSGICallback) -> Iterable[bytes]:
+        p_type, p_data = self.normalise_path(environ.get("PATH_INFO", "/"))
+        response: Optional[Response] = None
+
+        if p_type == "root":
+            response = Response(
+                302,
+                "text/plain",
+                [b"Hello!"],
+                headers=[("Location", "/assets/home.html")],
+            )
+
+        elif p_type == "load":
+            self.reload(p_data)
+            response = Response(
+                302,
+                "text/plain",
+                [b"Hello!"],
+                headers=[("Location", "/assets/home.html")],
+            )
+
+        elif p_type == "thumb":
+            response = self.page_file(
+                environ, "thumbs/thumb_" + p_data + ".jpg"
+            )
+
+        elif p_type == "image":
+            response = self.page_file(environ, glob.glob(f"data/{p_data}.*")[0])
+
+        elif p_type == "assets":
+            response = self.page_file(environ, "html_assets/" + p_data)
+
+        elif p_type == "api":
+            response = self.api(p_data, environ)
+
+        if not response:
+            response = Response(404, "text/plain", [b"Not Found"])
+
+        start(response.get_status(), response.get_headers())
+
+        return response.get_contents()
+
+    def api(self, p_data: str, environ: WSGIEnv) -> Response:
+        if p_data == "order":
+            return self.send_json([x.__dict__ for x in self.images])
+
+        if p_data == "unused":
+            return self.send_json([x.__dict__ for x in self.unused])
+
+        if p_data == "commit":
+            self.write_out(self.qfile)
+            self.reload(self.qfile)
+            print(f"Deleting ordered/ordering-{self.queue}")
+            os.remove(f"ordered/ordering-{self.queue}")
+            print(f"Deleting boards/ordering-{self.queue}")
+            os.remove(f"boards/ordering-{self.queue}")
+
+            return Response(
+                302,
+                "text/plain",
+                [b"Hello!"],
+                headers=[("Location", "/assets/home.html")],
+            )
+
+        if p_data == "shuffle":
+            random.shuffle(self.images)
+            self.write_out()
+
+            return Response(
+                302,
+                "text/plain",
+                [b"Hello!"],
+                headers=[("Location", "/assets/home.html")],
+            )
+
+        if p_data == "remove":
+            iid = environ["wsgi.input"].read().decode("utf-8")
+            self.remove(iid)
+        elif p_data == "purge":
+            iid = environ["wsgi.input"].read().decode("utf-8")
+            self.purge(iid)
+        elif p_data == "reorder":
+            data = json.load(environ["wsgi.input"])
+            self.reorder(data["moved"], data["before"])
+
+        self.write_out()
+
+        return Response(204, "text/plain", [b"Done"])
+
+    def remove(self, iid: str) -> None:
+        removed = filter(lambda a: a.iid == iid, self.images)
+        self.images = list(filter(lambda a: a.iid != iid, self.images))
+        self.unused.extend(removed)
+
+        print(f"Removed {iid}")
+
+    def purge(self, iid: str) -> None:
+        removed = filter(lambda a: a.iid == iid, itertools.chain(self.images, self.unused))
+        self.images = list(filter(lambda a: a.iid != iid, self.images))
+        self.unused = list(filter(lambda a: a.iid != iid, self.unused))
+
+        for image in removed:
+            for _file in glob.glob(f"data/{image.iid}.*"):
+                print(f"Deleting {_file}")
+                os.remove(_file)
+
+            print(f"Deleting thumbs/thumb_{image.iid}.jpg")
+            os.remove(f"thumbs/thumb_{image.iid}.jpg")
+
+        print(f"Purged {iid}")
+
+    def reorder(self, imoved: str, before: str) -> None:
+        moved = next(
+            filter(lambda a: a.iid == imoved, itertools.chain(self.images, self.unused)),
+            None,
+        )
+
+        if moved is None:
+            return
+
+        self.images = list(filter(lambda a: a.iid != moved.iid, self.images))
+        self.unused = list(filter(lambda a: a.iid != moved.iid, self.unused))
+
+        index = next((i for i, item in enumerate(self.images) if item.iid == before), 0)
+
+        self.images = self.images[0:index] + [moved] + self.images[index:]
+
+        print(f"Moved {moved.iid} before {before}")
+
+    def write_out(self, fil: Optional[str] = None) -> None:
+        if not fil:
+            fil = f"ordered/ordering-{self.queue}"
+
+        with open(fil, "wt", encoding="utf-8") as outfile:
+            last_source = ""
+
+            for image in self.images:
+                if image.source != last_source:
+                    outfile.write("\n" + image.source + "\n")
+                    last_source = image.source
+
+                outfile.write(" - " + image.url + "\n")
+
+        with open("queues/reserve.txt", "wt", encoding="utf-8") as outfile:
+            last_source = ""
+
+            for image in self.unused:
+                if image.source != last_source:
+                    outfile.write("\n" + image.source + "\n")
+                    last_source = image.source
+
+                outfile.write(" - " + image.url + "\n")
+
+    @staticmethod
+    def normalise_path(path: str) -> Tuple[str, str]:
+        if path[0] == "/":
+            path = path[1:]
+
+        if "/" not in path:
+            return "root", ""
+
+        return tuple(path.split("/", 1))  # type: ignore
+
+    @staticmethod
+    def page_file(environ: WSGIEnv, path: str) -> Response:
+        with open(path, "rb") as infile:
+            stat = os.fstat(infile.fileno())
+            modified = stat.st_mtime
+            contents = list(infile.readlines())
+            tag = hashlib.md5(b"".join(contents)).hexdigest()
+
+        mime = os.path.splitext(path)[1][1:]
+        if mime == "js":
+            mime = "application/javascript"
+        elif mime in ["jpg", "jpeg", "png", "gif"]:
+            mime = "image/" + mime
+        elif mime in ["mp4"]:
+            mime = "video/" + mime
+        else:
+            mime = "text/" + mime
+
+        if environ.get("HTTP_IF_NONE_MATCH", "") == tag:
+            return Response(304, mime, [], modified, tag)
+
+        return Response(200, mime, contents, modified, tag)
+
+    @staticmethod
+    def send_json(data: Any) -> Response:
+        return Response(
+            200,
+            "application/json",
+            [x.encode("utf-8") for x in json.JSONEncoder().iterencode(data)],
+        )
+
+
+class StandAlone(gunicorn.app.base.Application):  # type: ignore
+    queue: str
+    options: Dict[str, Any]
+
+    def __init__(self, queue: str, options: Dict[str, Any]):
+        self.queue = queue
+        self.options = options
+
+        super().__init__()
+
+    def load_config(self) -> None:
+        config = {
+            key: value
+            for key, value in self.options.items()
+            if key in self.cfg.settings and value is not None
+        }
+        for key, value in config.items():
+            self.cfg.set(key.lower(), value)
+
+    def init(self, parser: Any, opts: Any, args: Any) -> None:
+        pass
+
+    def load(self) -> Handler:
+        return Handler(self.queue)
+
+
+if __name__ == "__main__":
+    _options = {
+        "bind": "%s:%s" % ("127.0.1.4", "8888"),
+        "workers": 1,
+    }
+
+    StandAlone(sys.argv[1], _options).run()

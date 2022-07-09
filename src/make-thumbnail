@@ -1,0 +1,45 @@
+#!/bin/sh
+
+while [ -n "$1" ]
+do
+	SOURCE=$1
+	shift
+
+	if [ ! -f "$SOURCE" ]
+	then
+		printf >&2 "Unable to locate %s\n" "$SOURCE"
+		continue
+	fi
+
+	printf "Making thumbnail for %s\n" "$SOURCE"
+
+	COLLAGE=""
+	COUNT=0
+
+	exec 3<"${SOURCE}"
+
+	while read -r IMAGE _ SOURCE <&3
+	do
+		HASH=${IMAGE%.*}
+		EXT=${IMAGE##*.}
+
+		DIMENSIONS=$(identify -format '%[fx:w]:%[fx:h]' "${THUMBS}/thumb_${HASH}.jpg")
+		WIDTH=${DIMENSIONS%:*}
+		HEIGHT=${DIMENSIONS#*:}
+
+		if [ $WIDTH -lt 180 -a $HEIGHT -eq 200 ]
+		then
+			COLLAGE="${COLLAGE}${THUMBS}/thumb_${HASH}.jpg\n"
+			COUNT=$(( $COUNT + 1 ))
+		fi
+
+		if [ $COUNT -eq 4 ]
+		then
+			break
+		fi
+	done
+
+	exec 3<&-
+
+	echo "$COLLAGE" | head -n 4 | xargs sh -c "montage -background transparent \$0 \$1 \$2 \$3 -geometry 150x150^+0+0 webp:-"
+done

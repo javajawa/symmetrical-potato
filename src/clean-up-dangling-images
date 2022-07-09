@@ -1,0 +1,26 @@
+#!/bin/sh
+
+DATA=data
+THUMBS=thumbs
+
+find "$THUMBS" -type f | while read -r FILE
+do
+	HASH="${FILE#${THUMBS}/thumb_}"
+	HASH=${HASH%.jpg}
+
+	if [ -z $(find "$DATA" -type f -name ${HASH}.*) ]
+	then
+		rm -v "$FILE"
+	fi
+done
+
+find "$DATA" -type f | while read -r FILE
+do
+	HASH=${FILE#${DATA}/}
+	HASH=${HASH%.*}
+
+	if [ ! -f "${THUMBS}/thumb_${HASH}.jpg" ]
+	then
+		convert "${FILE}[0]" -resize 600x200 -background white -flatten "jpg:${THUMBS}/thumb_${HASH}.jpg"
+	fi
+done

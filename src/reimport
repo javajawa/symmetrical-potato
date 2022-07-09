@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+from typing import Dict, Generator, TextIO
+
+import json
+import glob
+import hashlib
+import os
+import os.path
+import pathlib
+import subprocess
+
+
+def main() -> None:
+	for queue in os.listdir("queues"):
+		print(f"Reimport missing images from {queue}")
+
+		in_handle = open(os.path.join("queues", queue), "rt")
+		out_handle = open(queue, "wt")
+
+		sources = set()
+		source = ""
+		images = []
+
+		while line := in_handle.readline():
+			if not line.strip():
+				continue
+
+			if line.startswith(" - "):
+				images.append(line)
+				continue
+
+			if source:
+				write_images(source, images, sources, out_handle)
+
+			source = line
+			images = []
+
+		in_handle.close()
+
+		write_images(source, images, sources, out_handle)
+		out_handle.flush()
+		out_handle.close()
+
+		os.rename(queue, os.path.join("queues", queue))
+
+
+def write_images(source: str, images: List[str], sources: Set[str], handle: TextIO) -> None:
+	if images:
+		handle.write(source)
+		handle.writelines(images)
+		handle.write("\n")
+		sources.add(source)
+
+		return
+
+	if source in sources:
+		return
+
+	grab_images(source.strip(), handle)
+	sources.add(source)
+
+
+def grab_images(source: str, handle: TextIO) -> None:
+	download = run("gallery-dl", "--cookies", "cookies.txt", "-G", source)
+
+	if download.returncode != 0:
+		print("Error downloading", source)
+		return
+
+	urls = download.stdout.strip().split(b"\n")
+	urls = [url for url in urls if not url.startswith(b"| ")]
+
+	hashes = {hash5(url): url for url in urls}
+
+	hashes = {k: v for k, v in hashes.items() if not glob.glob(f"data/{k}.*")}
+
+	for hashed, url in hashes.items():
+		download = run("gallery-dl", "--cookies", "cookies.txt", "-d", "tmp", url)
+
+		if download.returncode != 0:
+			print("Error downloading", url)
+			continue
+
+		outlines = download.stdout.strip().split(b"\n")
+
+		for output in outlines:
+			if output.startswith(b"# "):
+				output = output[2:]
+
+			target = pathlib.Path(output.decode("utf-8"))
+			os.rename(target, os.path.join("data", hashed + target.suffix))
+			break
+
+	handle.write(source)
+	handle.write("\n")
+
+	for haash, url in hashes.items():
+		handle.write(f" - {url.decode('utf-8')}\n")
+
+	handle.write("\n")
+
+
+def run(*cmd: str) -> subprocess.CompletedProcess:
+	print("Running", cmd)
+	return subprocess.run(cmd, stdout=subprocess.PIPE)
+
+
+def hash5(data: bytes) -> str:
+	hasher = hashlib.md5()
+	hasher.update(data)
+	return hasher.hexdigest()
+
+
+def mkpath(parent: str, child: str) -> str:
+	child = child.lower().replace(" ", "_")
+
+	if not parent:
+		return child
+
+	return parent + "_" + child
+
+
+def scan_tree(tree, path="") -> Generator[Tuple[str, str], None, None]:
+	if tree["name"].lower() == "lewds":
+		yield from import_tree(tree, path)
+		return
+
+	if tree["type"] != "folder" or "children" not in tree:
+		return
+
+	for child in tree["children"]:
+		yield from scan_tree(child, mkpath(path, child["name"]))
+
+
+def import_tree(tree, path="") -> Generator[Tuple[str, str], None, None]:
+	print("Importing from", path)
+
+	if "children" not in tree:
+		return
+
+	for child in tree["children"]:
+		if child["type"] == "folder":
+			yield from import_tree(child, mkpath(path, child["name"]))
+		elif child["type"] == "url":
+			yield path, child["url"]
+		else:
+			print("Unknown bookmark type", child["type"])
+
+
+if __name__ == '__main__':
+	main()

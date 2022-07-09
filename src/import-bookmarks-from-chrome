@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+from typing import Dict, Generator, TextIO
+
+import json
+import glob
+import hashlib
+import os
+import os.path
+import pathlib
+import subprocess
+
+
+def main() -> None:
+    with open("/home/benedict/.config/chromium/Default/Bookmarks", "rt") as handle:
+        blob = json.load(handle)
+
+    handles: Dict[str, TextIO] = dict()
+    log = open("import.log", "at", encoding="utf-8")
+
+    for root in blob["roots"].values():
+        for folder, bookmark in scan_tree(root):
+            download = run("gallery-dl", "--cookies", "cookies.txt", "-G", bookmark)
+
+            if download.returncode != 0:
+                print("Error downloading", bookmark)
+                continue
+
+            urls = download.stdout.strip().split(b"\n")
+            urls = [url for url in urls if not url.startswith(b"| ")]
+
+            hashes = {hash5(url): url for url in urls}
+
+            hashes = {k: v for k, v in hashes.items() if not glob.glob(f"data/{k}.*")}
+
+            for hashed, url in hashes.items():
+                download = run("gallery-dl", "--cookies", "cookies.txt", "-d", "tmp", url)
+
+                if download.returncode != 0:
+                    print("Error downloading", url)
+                    continue
+
+                outlines = download.stdout.strip().split(b"\n")
+
+                for output in outlines:
+                    if output.startswith(b"# "):
+                        output = output[2:]
+
+                    target = pathlib.Path(output.decode("utf-8"))
+                    os.rename(target, os.path.join("data", hashed + target.suffix))
+                    break
+
+            if folder not in handles:
+                handles[folder] = open(f"queues/{folder}.txt", "at", encoding="utf-8")
+
+            handles[folder].write(bookmark)
+            handles[folder].write("\n")
+
+            for haash, url in hashes.items():
+                log.write(f"Add image {haash} to {folder} from {bookmark}")
+                log.flush()
+                handles[folder].write(f" - {url.decode('utf-8')}\n")
+
+            handles[folder].write("\n")
+
+    for handle in handles.values():
+        handle.flush()
+        handle.close()
+
+
+def run(*cmd: str) -> subprocess.CompletedProcess:
+    print("Running", cmd)
+    return subprocess.run(cmd, stdout=subprocess.PIPE)
+
+
+def hash5(data: bytes) -> str:
+    hasher = hashlib.md5()
+    hasher.update(data)
+    return hasher.hexdigest()
+
+
+def mkpath(parent: str, child: str) -> str:
+    child = child.lower().replace(" ", "_")
+
+    if not parent:
+        return child
+
+    return parent + "_" + child
+
+
+def scan_tree(tree, path="") -> Generator[Tuple[str, str], None, None]:
+    if tree["name"].lower() == "lewds":
+        yield from import_tree(tree, path)
+        return
+
+    if tree["type"] != "folder" or "children" not in tree:
+        return
+
+    for child in tree["children"]:
+        yield from scan_tree(child, mkpath(path, child["name"]))
+
+
+def import_tree(tree, path="") -> Generator[Tuple[str, str], None, None]:
+    print("Importing from", path)
+
+    if "children" not in tree:
+        return
+
+    for child in tree["children"]:
+        if child["type"] == "folder":
+            yield from import_tree(child, mkpath(path, child["name"]))
+        elif child["type"] == "url":
+            yield path, child["url"]
+        else:
+            print("Unknown bookmark type", child["type"])
+
+
+if __name__ == "__main__":
+    main()
